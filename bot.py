@@ -2,17 +2,20 @@ import time
 import requests
 import threading
 from queue import Queue
-from datetime import datetime
+from datetime import datetime, timedelta
 from mattermostdriver import Driver
 
 # Mattermost settings
 MATTERMOST_URL = "chat.mattermost.com"  # Replace with your Mattermost URL
-BOT_TOKEN = "YOURTOKEN"  # Replace with your bot token
-TEAM_NAME = "YOURMATTERMOSTTEAMNAME"  # Replace with your team name (slug)
+BOT_TOKEN = "YOURTOKEN_OF_THE_BOT"  # Replace with your bot token
+TEAM_NAME = "MATTERMOST_TEAMNAME"  # Replace with your team name (slug)
 
 # Ollama settings
 OLLAMA_API_URL = "http://localhost:11434/api/generate"  # Correct Ollama API endpoint
-OLLAMA_MODEL = "llama3.1"  # Specify the model you want to use
+OLLAMA_MODEL = "mistral"  # Specify the model you want to use
+
+# Enable or disable context tracking
+ENABLE_CONTEXT_TRACKING = True  # Set to True to enable context tracking
 
 # Initialize Mattermost driver with the provided settings (disable debug mode)
 driver = Driver({
@@ -34,8 +37,15 @@ last_poll_time = {}
 # Message queue to hold new messages for processing
 message_queue = Queue()
 
+# User context dictionary to store conversation context for each user
+# Structure: { user_id: (context, last_interaction_time) }
+user_context = {}  # Maps user_id to (context, last_interaction_time)
+
 # Store the bot's boot time to avoid responding to messages before it started
 boot_time = int(datetime.now().timestamp() * 1000)  # Boot time in milliseconds
+
+# Context expiration duration (4 minutes)
+CONTEXT_EXPIRATION_DURATION = timedelta(minutes=4)
 
 # Function to post a message to a Mattermost channel
 def post_message_to_mattermost(channel_id, message):
@@ -45,28 +55,39 @@ def post_message_to_mattermost(channel_id, message):
     })
 
 # Function to send a prompt to the Ollama API and get the response
-def get_ollama_response(prompt):
+def get_ollama_response(prompt, context=None):
     headers = {
         "Content-Type": "application/json"
     }
+    # Construct the request data
     data = {
         "model": OLLAMA_MODEL,  # Use the dynamic model variable
         "prompt": prompt,
         "stream": False  # Ensure streaming is disabled
     }
 
+    # Only send context if ENABLE_CONTEXT_TRACKING is True and context is provided
+    if ENABLE_CONTEXT_TRACKING and context:
+        data["context"] = context
+
+    # Debug output: Show what is being sent to Ollama API
+    if debug_messages:
+        print(f"[DEBUG] Sending to Ollama: {data}")
+
     try:
         response = requests.post(OLLAMA_API_URL, json=data, headers=headers)
         if response.status_code == 200:
             # Parse the response from Ollama
             ollama_response = response.json()
-            return ollama_response.get("response", "No response from Ollama")
+            return ollama_response.get("response", "No response from Ollama"), ollama_response.get("context", "")
         else:
             print(f"Error: Ollama returned status code {response.status_code}")
-            return f"Error: Ollama returned status code {response.status_code}"
+            if debug_messages:
+                print(f"[DEBUG] Response Content: {response.text}")
+            return f"Error: Ollama returned status code {response.status_code}", ""
     except Exception as e:
         print(f"Error communicating with Ollama: {e}")
-        return "Error: Unable to get a response from Ollama."
+        return "Error: Unable to get a response from Ollama.", ""
 
 # Worker function to process messages from the queue
 def message_processor():
@@ -75,10 +96,33 @@ def message_processor():
             # Wait for a new message to be added to the queue
             channel_id, message_text, sender_username, message_time = message_queue.get()
 
-            # Get the response from Ollama
-            bot_response = get_ollama_response(message_text)
+            # Update user context and check for expiration
+            user_id = sender_username  # Assuming sender_username is the user's ID
+            current_time = datetime.now()
+
+            # Initialize or update context for the user
+            if user_id not in user_context:
+                user_context[user_id] = ("", current_time)  # Start with empty context for the first interaction
+
+            # Expire context if necessary
+            context, last_interaction_time = user_context[user_id]
+            if ENABLE_CONTEXT_TRACKING and current_time - last_interaction_time > CONTEXT_EXPIRATION_DURATION:
+                context = ""  # Reset context if expired
+                if debug_messages:
+                    print(f"[DEBUG] User context for {user_id} expired.")
+
+            # Only include context if context tracking is enabled
+            if ENABLE_CONTEXT_TRACKING and context:
+                bot_response, new_context = get_ollama_response(message_text, context)
+            else:
+                bot_response, new_context = get_ollama_response(message_text)
+
             if debug_messages:
                 print(f"Ollama response: {bot_response}")
+
+            # If context tracking is enabled, update the user's context
+            if ENABLE_CONTEXT_TRACKING:
+                user_context[user_id] = (new_context, current_time)
 
             # Post the response back to the channel
             post_message_to_mattermost(channel_id, bot_response)
@@ -183,7 +227,7 @@ def message_poller():
             print(f"Error while polling messages: {e}")
 
         # Poll every half second
-        time.sleep(0.5)
+        time.sleep(1)
 
 if __name__ == "__main__":
     # Start the message poller thread
