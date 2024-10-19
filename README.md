@@ -1,5 +1,8 @@
 **Simple Ollama Mattermost Bot**
 
+This is a very simple mattermost bot which interacts with an ollama llm instance (https://ollama.com/). This is useful if you cannot use mattermost co-pilot beause of MySQL as example.
+You can interact with the bot by ether mention the bot in a channel where he is or users can send direct messages to the bot.
+
 Usage:
 
 pip install requests mattermostdriver
